@@ -1,6 +1,6 @@
 ######
 ##
-# 1) start: docker-compose -f docker-compose-prod.yml up -d
+# 1) start: docker-compose -f docker-compose-momsuite.yml up -d
 # 2) attach: docker attach ...
 # 3) detach: detach with <CTRL-p> <CTRL-q>
 # 4) stop: docker-compose down
@@ -16,7 +16,7 @@ services:
 
   # BEGIN: FRONTEND
   frontend:
-    image: bigabig/mbot-frontend:latest
+    image: bigabig/mbot-frontend:1.1
     container_name: frontend
     ports:
       - 8080:8080
@@ -46,16 +46,18 @@ services:
 
   # BEGIN: SPACY
   spacy:
-    image: bigabig/mbot-spacy:latest
+    image: bigabig/mbot-spacy:1.1
+    container_name: spacy
     ports:
       - 9999:9999
     healthcheck:
       test: curl 0.0.0.0:9999/health
-      interval: 60s
-      timeout: 5s
+      interval: 120s
+      timeout: 10s
       retries: 5
     networks:
       - anet
-    #    entrypoint: ["python", "app.py", "-l", "de"]
+#    entrypoint: ["python", "app.py", "-l", "de"]
+#    set language with -l, supported languages are 'de', 'en' or 'both'
     command: ["-l", "de"]
   # END: SPACY
