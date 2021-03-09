@@ -58,17 +58,19 @@ import scipy.io.wavfile as wavefile
 
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 
+red = redis.StrictRedis()
+decode_control_channel = 'asr_control'
+audio_data_channel = 'asr_audio'
 
 #Do most of the message passing with redis, now standard version
 class ASRRedisClient():
 
-    def __init__(self, red, server='localhost', channel='asr', record_message_history=False):
+    def __init__(self, channel='asr', record_message_history=False):
         self.channel = channel
         self.timer_started = False
         self.timer = Timer()
         self.record_message_history = record_message_history
         self.last_message_time = 0.0
-        self.red = red
 
         # if record_message_history= True, we store a program in self.message_trace that when
         # executed replays all messages into the asr channel
@@ -76,12 +78,11 @@ class ASRRedisClient():
         self.message_trace = 'import time\n' \
                              'import json\n' \
                              'import redis\n\n' \
-                             'red = redis.StrictRedis(host=%s)\n' \
+                             'red = redis.StrictRedis()\n' \
                              'time_factor = 1.0\n' \
-                             'asr_channel = "%s"\n\n' % (server, channel)
+                             'asr_channel = "asr"\n\n'
 
     def publish(self, data):
-        red = self.red
         json_dumps_data = json.dumps(data)
         red.publish(self.channel, json_dumps_data)
         cur_time = float(self.timer.current_secs())
@@ -126,7 +127,7 @@ class ASRRedisClient():
     def sendstatus(self, isDecoding, shutdown=False):
         self.checkTimer()
         data = {'handle': 'status', 'time': float(self.timer.current_secs()), 'isDecoding': isDecoding, 'shutdown': shutdown}
-        self.red.publish(self.channel, json.dumps(data))
+        red.publish(self.channel, json.dumps(data))
 
 def load_model(config_file, online_config, models_path='models/', beam_size=10, frames_per_chunk=50):
     # Read YAML file
@@ -312,10 +313,9 @@ def print_devices(paudio):
             print("Output Device id ", i, " - ", paudio.get_device_info_by_host_api_device_index(0,i).get('name'))
 
 # Realtime decoding loop, uses blocking calls and interfaces a microphone directly (with pyaudio)
-def decode_chunked_partial_endpointing_mic(asr, red, feat_info, decodable_opts, paudio, input_microphone_id, channels=1,
+def decode_chunked_partial_endpointing_mic(asr, feat_info, decodable_opts, paudio, input_microphone_id, channels=1,
                                            samp_freq=16000, record_samplerate=16000, chunk_size=1024, wait_for_start_command=False, record_message_history=False, compute_confidences=True, asr_client=None, speaker_str="Speaker",
-                                           resample_algorithm="sinc_best", save_debug_wav=False, use_threads=False, minimum_num_frames_decoded_per_speaker=5, mic_vol_cutoff=0.5, use_local_mic=True, decode_control_channel='asr_control',
-                                           audio_data_channel='asr_audio'):
+                                           resample_algorithm="sinc_best", save_debug_wav=False, use_threads=False, minimum_num_frames_decoded_per_speaker=5, mic_vol_cutoff=0.5, use_local_mic=True):
     
     # Subscribe to command and control redis channel
     p = red.pubsub()
@@ -667,13 +667,7 @@ if __name__ == '__main__':
 
     parser.add_argument('-fpc', '--frames_per_chunk', dest='frames_per_chunk', help='Frames per (decoding) chunk. This will also have an effect on latency.', type=int, default=30)
 
-    parser.add_argument('-rs', '--redis-server', dest='redis_server', help='Hostname or IP of the server (for redis-server)', type=str, default='localhost')
-
     parser.add_argument('-red', '--redis-channel', dest='redis_channel', help='Name of the channel (for redis-server)', type=str, default='asr')
-
-    parser.add_argument('--redis-audio', dest='redis_audio_channel', help='Name of the channel (for redis-server)', type=str, default='asr_audio')
-    parser.add_argument('--redis-control', dest='redis_control_channel', help='Name of the channel (for redis-server)', type=str, default='asr_control')
-
     parser.add_argument('-y', '--yaml-config', dest='yaml_config', help='Path to the yaml model config', type=str, default='models/kaldi_tuda_de_nnet3_chain2.yaml')
     parser.add_argument('-o', '--online-config', dest='online_config', help='Path to the Kaldi online config. If not available, will try to read the parameters from the yaml'
                                                                             ' file and convert it to the Kaldi online config format (See online_config_options.info.txt for details)',
@@ -684,7 +678,7 @@ if __name__ == '__main__':
 
     parser.add_argument('-a', '--resample_algorithm', dest='resample_algorithm', help="One of the following: linear, sinc_best, sinc_fastest,"
                                                                                       " sinc_medium, zero_order_hold (default: sinc_best)",
-                                                                                      type=str, default="sinc_fastest")
+                                                                                      type=str, default="sinc_best")
 
     parser.add_argument('-t', '--use-threads', dest='use_threads', help='Use a thread worker for realtime decoding',
                         action='store_true', default=False)
@@ -698,16 +692,13 @@ if __name__ == '__main__':
                                                                               ' so that the recording quality can be analysed', action='store_true', default=False)
 
     args = parser.parse_args()
-    
-    # Start redis
-    red = redis.StrictRedis(host=args.redis_server)
-    
+
     if args.list_audio_interfaces:
         print("Listing audio interfaces...")
         paudio = pyaudio.PyAudio()
         print_devices(paudio)
     else:
-        asr_client = ASRRedisClient(red=red, server=args.redis_server, channel=args.redis_channel, record_message_history=args.record_message_history)
+        asr_client = ASRRedisClient(channel=args.redis_channel, record_message_history=args.record_message_history)
         asr_client.asr_loading(speaker=args.speaker_name)
         asr, feat_info, decodable_opts = load_model(args.yaml_config, args.online_config, beam_size=args.beam_size, frames_per_chunk=args.frames_per_chunk)
         if args.micid == -1:
@@ -718,11 +709,10 @@ if __name__ == '__main__':
                                                chunk_size=args.chunk_size)
         else:
             paudio = pyaudio.PyAudio()
-            decode_chunked_partial_endpointing_mic(asr, red, feat_info, decodable_opts, paudio, asr_client=asr_client,
+            decode_chunked_partial_endpointing_mic(asr, feat_info, decodable_opts, paudio, asr_client=asr_client,
                                                    input_microphone_id=args.micid, speaker_str=args.speaker_name,
                                                    samp_freq=args.decode_samplerate, record_samplerate=args.record_samplerate,
                                                    chunk_size=args.chunk_size, wait_for_start_command=args.wait_for_start_command,
                                                    record_message_history=args.record_message_history, channels=args.channels,
                                                    resample_algorithm=args.resample_algorithm, save_debug_wav=args.save_debug_wav, use_threads=args.use_threads,
-                                                   minimum_num_frames_decoded_per_speaker=args.minimum_num_frames_decoded_per_speaker, use_local_mic=not args.enable_server_mic,
-                                                   decode_control_channel=args.redis_control_channel, audio_data_channel=args.redis_audio_channel)
+                                                   minimum_num_frames_decoded_per_speaker=args.minimum_num_frames_decoded_per_speaker, use_local_mic=not args.enable_server_mic)
